@@ -1,16 +1,16 @@
-# Sandbox Filesystem Experiment — 2026-04-20
+# 沙箱文件系统实验 — 2026-04-20
 
-> Companion to [the main design docs](../../README.md). **This experiment report supersedes theoretical claims with measured reality.**
+> 主设计文档的配套实验：[the main design docs](../../README.md)。**本实验报告以实测结果覆盖先前的理论推断。**
 >
 > Run ID: `Rmo7btrg0-126701172164598` · Date: 2026-04-20 (UTC) · Kernel: Linux 6.18.16 NixOS SMP · Host: cobb-prod
 >
-> This report is empirical. Any claim without a probe is a bug.
+> 本报告为实测结果。任何没有探针支撑的断言都是 bug。
 
-## Abstract
+## 摘要
 
-This report runs a five-dimension experiment battery across the three file-touching tools available to the agent (`file`, `execute_js` with `require('twin:fs')`, and `shell`) to measure — rather than speculate about — the shape of the sandbox filesystem. Across **40+ targeted probes** we establish: (1) cross-tool visibility works bi-directionally in both the `downloads` and `generated` namespaces, contradicting the earlier design-doc assumption that the `file` tool only reads from `downloads`; (2) `/tmp`, symlinks, hardlinks, executable-bit metadata, and any file larger than the **104 857 600-byte shell output cap** do *not* survive between shell invocations; (3) the backing store is a single btrfs subvolume (`subvolid=259, subvol=/tmp`, fsid `cfeb616c473e53b`) exposed at different mount paths with different ro/rw flags per tool; (4) write-conflict resolution is last-writer-wins with zero version metadata, across all pairings. Size ceilings confirmed: 100 MB + 10 000-small-files both succeed in `/agent/current/generated` via `execute_js`, but shell fails to commit its output when the per-run 100 MB cap is crossed.
+本报告针对 agent 可用的三个触碰文件系统的工具（`file`、带 `require('twin:fs')` 的 `execute_js`、`shell`）运行一套五维实验矩阵，用**测量**而非推测的方式刻画沙箱文件系统。我们通过 **40+ 条目标明确的探针**确立以下事实：(1) 跨工具可见性在 `downloads` 与 `generated` 两个命名空间下都是双向可达的，这否定了早先设计文档中"`file` 工具只从 `downloads` 读"的假设；(2) `/tmp`、符号链接、硬链接、可执行位元数据，以及任何超过 **104 857 600 字节 shell 输出上限**的文件，都 *不会* 在 shell 调用之间存活；(3) 后端存储是**一个**挂载在多个不同路径、按工具授予不同 ro/rw 标志的 btrfs 子卷（`subvolid=259, subvol=/tmp`，fsid `cfeb616c473e53b`）；(4) 写冲突解决方式是"最后一次写入者赢"(last-writer-wins)，零版本元数据，所有工具配对皆然。容量上限确认：通过 `execute_js` 在 `/agent/current/generated` 下写 100 MB 单文件 + 10 000 个小文件都成功，但当一次 shell 调用的总产出超过 100 MB 上限时，shell 无法将输出提交回后端。
 
-## Environment
+## 环境
 
 ```console
 $ uname -a
@@ -45,17 +45,17 @@ tmpfs        567G     0  567G   0% /tmp
 tmpfs        567G     0  567G   0% /
 ```
 
-**Observation:** all four `/agent/*` and `/workspace/chat` mounts target the same btrfs subvolume (`subvolid=259`). The root FS (`/`) and `/tmp` are tmpfs with 567 GB of RAM-backed space each. Root cwd on shell is `/agent/generated`.
+**观察：**所有四个 `/agent/*` 与 `/workspace/chat` 挂载点都指向同一个 btrfs 子卷（`subvolid=259`）。根文件系统（`/`）与 `/tmp` 都是 tmpfs，各有 567 GB 内存支持的空间。shell 的默认 cwd 为 `/agent/generated`。
 
-## Methodology
+## 方法论
 
-- **Unique IDs.** Each probe file is named `<prefix>-<run_id>-<random>` where `run_id=Rmo7btrg0-126701172164598` and `<random>` is a per-probe Math.random-derived token. This eliminates overlap with files from prior runs and lets us correlate writer → reader by filename.
-- **Content markers.** Each write includes writer, namespace, id, and ISO timestamp inside the file body, so content matches can be verified byte-for-byte.
-- **Timings.** `execute_js` timings use `Date.now()` before/after each `writeFileSync`. `shell` timings use `date +%s%N`.
-- **Hashes.** `sha256sum` from the shell for canonical hashes; inside `execute_js` (which has no `crypto` module) we compute a 32-bit rolling-XOR fold for cheap equality checks.
-- **Tool-ID anchors used throughout this report:**
+- **唯一 ID。** 每个探针文件以 `<prefix>-<run_id>-<random>` 的形式命名，其中 `run_id=Rmo7btrg0-126701172164598`，`<random>` 为每探针随机生成的 Math.random 派生 token。这既避免了与历史运行产生文件名冲突，又能按文件名回溯"谁写→谁读"关系。
+- **内容标记。** 每个写入体内都嵌入 writer、namespace、id、ISO 时间戳，使跨工具读取能按字节比对内容。
+- **计时。** `execute_js` 内部使用 `Date.now()` 在每次 `writeFileSync` 前后采样。`shell` 使用 `date +%s%N`。
+- **哈希。** 使用 shell 里的 `sha256sum` 做权威哈希；`execute_js` 里没有 `crypto` 模块，因此用 32 位 XOR 折叠做轻量相等性校验。
+- **本报告通篇使用的工具-ID 锚点：**
 
-| Short | Long |
+| 短名 | 完整值 |
 |---|---|
 | `EJS_GEN` | `P1EG-mo7btrg0-917640988283214` |
 | `EJS_DL`  | `P1ED-mo7btrg0-584558632549247` |
@@ -68,19 +68,19 @@ tmpfs        567G     0  567G   0% /
 | `RAPID`   | `P3R-mo7btrg0-906590488166303` |
 | `CNT`     | `P5C-mo7btrg0-085814630710339` |
 
-## Dimension 1 — Cross-tool visibility (6 directions × 2 namespaces)
+## 维度 1 — 跨工具可见性（6 个方向 × 2 个命名空间）
 
-### Hypothesis
+### 假设
 
-Every `(writer, reader)` pair should see the same bytes at the other tool's equivalent mount path, assuming the writer could legally write at all (shell cannot write to `/agent/downloads`; execute_js cannot write to `/tmp`/`/workspace`).
+对每一对 `(writer, reader)`，只要写入者能合法写入（shell 不能写 `/agent/downloads`；execute_js 不能写 `/tmp`/`/workspace`），读取者就应当在另一个工具的等价挂载路径下看到同样的字节。
 
-### Procedure
+### 流程
 
-Each writer plants a uniquely-named marker file in its own namespace; each reader then looks for that file and compares content. Shell uses `sha256sum`; execute_js uses `readFileSync` + a XOR-fold equality test; `file` tool is read-tested via `upload_via_curl` (the tool has no explicit "read" action — upload reads from disk, so a successful POST with expected body proves readability).
+每个写入者在自己的命名空间下植入一个唯一命名的标记文件；每个读取者再尝试按自己的路径约定寻找该文件并比对内容。Shell 用 `sha256sum`；execute_js 用 `readFileSync` + XOR 折叠做相等性测试；`file` 工具通过 `upload_via_curl` 被间接读测（它没有显式的 "read" 动作 — upload 从磁盘读，因此一次返回预期 body 的 POST 即证明可读性）。
 
-### Raw results
+### 原始结果
 
-**P01 `file` → `execute_js` (downloads)**
+**P01 `file` → `execute_js`（downloads）**
 
 ```console
 // file tool downloaded 37 bytes with content_hash=d955917a...
@@ -89,9 +89,9 @@ fs.readFileSync('/agent/current/downloads/probe_P1FD-mo7btrg0-521300225033074.tx
 => "dim1 writer=file namespace=downloads\n"
 ```
 
-Size 37 bytes, visible, content matches (base64-decoded from the httpbin URL).
+37 字节，可见，内容匹配（由 httpbin URL 的 base64 解码得出）。
 
-**P02 `file` → `shell` (downloads)**
+**P02 `file` → `shell`（downloads）**
 
 ```console
 $ cat /agent/downloads/probe_P1FD-mo7btrg0-521300225033074.txt
@@ -100,9 +100,9 @@ $ sha256sum /agent/downloads/probe_P1FD-mo7btrg0-521300225033074.txt
 (hash of 37-byte file)
 ```
 
-Visible, content identical.
+可见，字节内容一致。
 
-**P03 `execute_js` → `shell` (generated and downloads)**
+**P03 `execute_js` → `shell`（generated 与 downloads）**
 
 ```console
 $ stat -c "size=%s inode=%i" /agent/generated/probe_P1EG-mo7btrg0-917640988283214.txt
@@ -116,9 +116,9 @@ $ cat /agent/downloads/probe_P1ED-mo7btrg0-584558632549247.txt
 dim1 writer=execute_js ns=downloads id=P1ED-mo7btrg0-584558632549247 ts=2026-04-20T15:05:13.776Z
 ```
 
-Both visible with byte-identical content and distinct inodes.
+两份文件均可见，字节逐一一致，inode 不同。
 
-**P04 `execute_js` → `file` (upload the downloads plant back to httpbin)**
+**P04 `execute_js` → `file`（通过 upload 把 downloads 植入物回发到 httpbin）**
 
 ```console
 file.upload_via_curl(filename='probe_P1ED-mo7btrg0-584558632549247.txt',
@@ -127,9 +127,9 @@ file.upload_via_curl(filename='probe_P1ED-mo7btrg0-584558632549247.txt',
    Content-Length: 97
 ```
 
-File-tool **does** see the execute_js-written file in `downloads` — the upload succeeded with matching body.
+`file` 工具**确实**能看到 execute_js 在 `downloads` 写入的文件——upload 成功，body 精确匹配。
 
-**P05 `shell` → `execute_js` (generated only; shell cannot write downloads)**
+**P05 `shell` → `execute_js`（仅 generated；shell 无法写 downloads）**
 
 ```console
 // shell wrote /agent/generated/probe_P1SG-mo7btrg0-972675540716829.txt (88 bytes)
@@ -138,9 +138,9 @@ fs.readFileSync('/agent/current/generated/probe_P1SG-mo7btrg0-972675540716829.tx
 => "dim1 writer=shell ns=generated id=P1SG-mo7btrg0-972675540716829 ts=2026-04-20T15:08:45Z\n"
 ```
 
-Visible, content matches.
+可见，内容一致。
 
-**P06 `shell` → `file` (upload shell-written file in generated)**
+**P06 `shell` → `file`（upload 读取 shell 写在 generated 下的文件）**
 
 ```console
 file.upload_via_curl(filename='probe_P1SG-mo7btrg0-972675540716829.txt',
@@ -149,9 +149,9 @@ file.upload_via_curl(filename='probe_P1SG-mo7btrg0-972675540716829.txt',
    Content-Length: 88
 ```
 
-**Surprise.** The file tool's `upload_via_curl` reads by **bare filename** and happily found this file in `/agent/generated`, even though the previous design doc asserted the file tool only operates on `downloads`. Evidence: httpbin echoed back the shell-written bytes verbatim.
+**意外发现。** `file` 工具的 `upload_via_curl` 以**纯文件名**作为读入参数，居然也能在 `/agent/generated` 下找到这份文件——而先前的设计文档断言 `file` 工具只操作 `downloads`。证据：httpbin 把 shell 写的字节原样回显。
 
-**P07 EROFS probes**
+**P07 EROFS 探针**
 
 ```console
 $ echo "attempt" > /agent/downloads/probe_shell_EROFS_test.txt
@@ -166,78 +166,78 @@ exit=1
 /agent/context/probe_context_...=> Error: EACCES: path is read-only
 ```
 
-### Analysis
+### 分析
 
-All six directions work for files in the `downloads` and `generated` namespaces, with one qualifier: shell cannot plant into `downloads` because that mount is `ro`. File-tool upload reads are **namespace-agnostic by filename** — a fact not stated in the design docs.
+所有六个方向在 `downloads` 与 `generated` 命名空间内均有效，唯一限制：shell 无法写入 `downloads`（其挂载为 `ro`）。`file` 工具的 upload 以**纯文件名**寻找——这一事实设计文档里并未说明。
 
-### Result table
+### 结果汇总
 
-| # | Writer | Namespace | Reader | Visible? | Bytes match? | Evidence |
+| # | 写入者 | 命名空间 | 读取者 | 是否可见？ | 字节是否一致？ | 证据 |
 |---|---|---|---|---|---|---|
 | 1 | `file` | downloads | `execute_js` | ✅ | ✅ | P01 |
 | 2 | `file` | downloads | `shell` | ✅ | ✅ | P02 |
 | 3 | `execute_js` | generated | `shell` | ✅ | ✅ | P03 |
 | 4 | `execute_js` | downloads | `shell` | ✅ | ✅ | P03 |
-| 5 | `execute_js` | downloads | `file` (upload) | ✅ | ✅ | P04 |
+| 5 | `execute_js` | downloads | `file`（upload） | ✅ | ✅ | P04 |
 | 6 | `shell` | generated | `execute_js` | ✅ | ✅ | P05 |
-| 7 | `shell` | generated | `file` (upload) | ✅ | ✅ | P06 (**new finding: namespace-agnostic**) |
-| 8 | `shell` | downloads | — | ❌ | — | EROFS — shell cannot write to `/agent/downloads` |
+| 7 | `shell` | generated | `file`（upload） | ✅ | ✅ | P06（**新发现：命名空间无关**） |
+| 8 | `shell` | downloads | — | ❌ | — | EROFS — shell 无法写 `/agent/downloads` |
 
-## Dimension 2 — Persistence and lifecycle
+## 维度 2 — 持久性与生命周期
 
-### Hypothesis
+### 假设
 
-- `/agent/current/{downloads,generated}` (execute_js) → persistent.
-- `/agent/generated` (shell) → persistent on exit_code=0, with a per-run output cap.
-- `/tmp` (shell) → ephemeral, wiped each invocation.
-- `/workspace/chat`, `/agent/context` → read-only.
+- `/agent/current/{downloads,generated}`（execute_js）→ 持久化。
+- `/agent/generated`（shell）→ 当 exit_code=0 时持久化，受到每次调用的输出上限约束。
+- `/tmp`（shell）→ 短暂的，每次调用都会被清空。
+- `/workspace/chat`、`/agent/context` → 只读。
 
-### Procedure
+### 流程
 
-P08 Write one marker per candidate from each tool; then in *separate* subsequent tool calls verify survival. Also test whether `/agent/downloads` is a *mirror* of `/agent/current/downloads` or the identical mount.
+P08 从每个工具分别向每个候选路径写入一个标记；随后在 *独立的* 后续工具调用里验证存活。同时测试 `/agent/downloads` 是 `/agent/current/downloads` 的*镜像*还是同一挂载。
 
-### Raw results
+### 原始结果
 
-**Write attempts (execute_js side):**
+**写入尝试（execute_js 侧）：**
 
 ```console
 /tmp/probe_tmp_P2T-mo7btrg0-618965918717218.txt                => Error: EACCES
-/workspace/chat/probe_chat_P2C-mo7btrg0-083456173350600.txt   => Error: EACCES
+/workspace/chat/probe_chat_P2C-mo7btrg0-083456173350600.txt    => Error: EACCES
 /agent/context/probe_context_P2X-mo7btrg0-492938529108105.txt  => Error: EACCES
 /agent/current/generated/probe_generated_P2G-mo7btrg0-189758506661865.txt => OK
 /agent/current/downloads/probe_downloads_P2D-mo7btrg0-275725789819547.txt  => OK
 ```
 
-**Write attempts (shell side, 2 calls later):**
+**写入尝试（shell 侧，两次调用之后）：**
 
 ```console
 /tmp/probe_tmp_shell_P2T-mo7btrg0-618965918717218.txt           => exit=0 (writes succeed; ephemeral)
 /agent/generated/probe_generated_shell_P2G-mo7btrg0-189758506661865.txt => exit=0
 /agent/downloads/probe_downloads_shell_P2D-mo7btrg0-275725789819547.txt  => Read-only file system, exit=1
-/workspace/chat/probe_chat_shell_P2C-mo7btrg0-083456173350600.txt      => Read-only file system, exit=1
-/agent/context/probe_context_shell_P2X-mo7btrg0-492938529108105.txt     => Read-only file system, exit=1
+/workspace/chat/probe_chat_shell_P2C-mo7btrg0-083456173350600.txt        => Read-only file system, exit=1
+/agent/context/probe_context_shell_P2X-mo7btrg0-492938529108105.txt      => Read-only file system, exit=1
 ```
 
-**Persistence check (new execute_js call reads each plant):**
+**持久性验证（一次全新的 execute_js 调用读取各植入物）：**
 
 ```console
 ejs sees /agent/current/generated/probe_generated_shell_P2G-mo7btrg0-189758506661865.txt
-    => "shell-ts-1776697725179315336"    ← shell plant survives, ejs reads it
-ejs missing /tmp/probe_tmp_shell_P2T-mo7btrg0-618965918717218.txt          ← ejs has no /tmp mount at all
-ejs missing /workspace/chat/...                                ← ejs has no /workspace mount at all
+    => "shell-ts-1776697725179315336"    ← shell 植入物存活，ejs 能读到
+ejs missing /tmp/probe_tmp_shell_P2T-mo7btrg0-618965918717218.txt  ← ejs 根本看不到 /tmp
+ejs missing /workspace/chat/...                                     ← ejs 根本看不到 /workspace
 
 dim2 ejs plant dl SURVIVED: "dl P2D-mo7btrg0-275725789819547"
 dim2 ejs plant gen SURVIVED: "gen P2G-mo7btrg0-189758506661865"
 ```
 
-**/tmp lifecycle (shell call N then N+1):**
+**/tmp 生命周期（shell 第 N 次调用 → 第 N+1 次调用）：**
 
 ```console
 shell call N: echo "..." > /tmp/probe_tmp_shell_P2T-mo7btrg0-618965918717218.txt → exit=0, visible
 shell call N+1: ls /tmp → directory is empty; probe file GONE
 ```
 
-**Mirror test (same filename, two mounts):**
+**镜像测试（同名文件，两个挂载）：**
 
 ```console
 $ stat -f -c 'fsid=%i type=%T' /agent/downloads
@@ -249,42 +249,42 @@ $ ls /agent/downloads/mirror_test.txt
 ls: cannot access '/agent/downloads/mirror_test.txt': No such file or directory
 ```
 
-**Same fsid, different subdirectories.** The btrfs subvolume is one logical filesystem; the mount table just binds different directory prefixes under it. A write to `/agent/generated/X` does **not** surface under `/agent/downloads/X` — they're sibling directories inside the same subvolume, not aliased paths.
+**fsid 相同，子目录不同。** btrfs 子卷是一个逻辑文件系统；挂载表只是把不同目录前缀绑定到同一子卷上。写 `/agent/generated/X` **不会**在 `/agent/downloads/X` 显现——它们是同一子卷里的兄弟目录，而非彼此互为别名的路径。
 
-### Analysis
+### 分析
 
-- `/tmp` is tmpfs, shell-local, wiped per invocation. execute_js cannot see it at all.
-- `/workspace/chat` and `/agent/context` are ro from shell and invisible from execute_js. They presumably hold pre-provisioned artefacts the agent platform can inject; in this run they are empty.
-- `/agent/generated` writes commit back into the btrfs subvolume, but only if the total shell-call output size stays under 100 MB (see Dim 5).
-- `/agent/current/{downloads,generated}` (execute_js) write-through is 100 % reliable.
+- `/tmp` 是 tmpfs，shell 进程本地，每次调用重置。execute_js 根本看不到它。
+- `/workspace/chat` 与 `/agent/context` 从 shell 侧只读、从 execute_js 侧不可见。它们大概是平台端用来注入预置构件的槽位；本次运行中为空。
+- `/agent/generated` 的 shell 写入会回提到 btrfs 子卷，但前提是整次 shell 调用的输出不超过 100 MB（见维度 5）。
+- `/agent/current/{downloads,generated}`（execute_js）直写始终 100% 可靠。
 
-### Result table
+### 结果汇总
 
-| Path (shell view) | Path (ejs view) | Writable? | Persists across calls? | Notes |
+| 路径（shell 视图） | 路径（ejs 视图） | 是否可写？ | 是否跨调用持久？ | 备注 |
 |---|---|---|---|---|
-| `/agent/downloads` | `/agent/current/downloads` | ejs ✅, shell ❌ | ✅ | ro from shell, rw from ejs |
-| `/agent/generated` | `/agent/current/generated` | both ✅ | ✅ (subject to 100 MB shell cap) | primary working space |
-| `/agent/context` | (invisible) | ❌ everyone | n/a | empty in practice |
-| `/workspace/chat` | (invisible) | ❌ everyone | n/a | empty in practice |
-| `/tmp` | (invisible) | shell ✅ | ❌ tmpfs, per-invocation | scratch only |
+| `/agent/downloads` | `/agent/current/downloads` | ejs ✅、shell ❌ | ✅ | shell 侧 ro，ejs 侧 rw |
+| `/agent/generated` | `/agent/current/generated` | 双方 ✅ | ✅（受制于 shell 100 MB 上限） | 主要工作区 |
+| `/agent/context` | （不可见） | 全部 ❌ | n/a | 实际运行中为空 |
+| `/workspace/chat` | （不可见） | 全部 ❌ | n/a | 实际运行中为空 |
+| `/tmp` | （不可见） | shell ✅ | ❌ tmpfs，每次调用清空 | 仅作 scratch |
 
-## Dimension 3 — Write semantics and conflict
+## 维度 3 — 写语义与冲突
 
-### Hypothesis
+### 假设
 
-All three writers overlap on the same namespaces, so conflicts are possible. Expect **last-writer-wins**, no version metadata, no warning.
+三个写入者在同样的命名空间里重叠，因此冲突有可能发生。预期是**最后一次写入者赢**，无版本元数据、无警告。
 
-### Procedure
+### 流程
 
-P09 Forward collision: `execute_js` writes `collision_P3A-mo7btrg0-029649523288351.txt` = `"A\n"` → `file.download_via_curl` overwrites with `"B\ndim3 file overwrite\n"` → all three readers inspect.
+P09 正向冲突：`execute_js` 写 `collision_P3A-mo7btrg0-029649523288351.txt` = `"A\n"` → `file.download_via_curl` 用 `"B\ndim3 file overwrite\n"` 覆盖 → 三个读取者分别检查。
 
-P10 Reverse collision: `file` writes `rev_collision_P3B-mo7btrg0-986243092136844.txt` = `"X\nfile wrote this\n"` → `execute_js` overwrites with `"Y\nejs overwrote\n"` → readers inspect.
+P10 反向冲突：`file` 写 `rev_collision_P3B-mo7btrg0-986243092136844.txt` = `"X\nfile wrote this\n"` → `execute_js` 用 `"Y\nejs overwrote\n"` 覆盖 → 读取者分别检查。
 
-P11 Rapid rewrites: `execute_js` writes `rapid_P3R-mo7btrg0-906590488166303.txt` 10× in a tight loop with distinct contents.
+P11 连续重写：`execute_js` 在紧密循环里对 `rapid_P3R-mo7btrg0-906590488166303.txt` 写入 10 次，每次内容不同。
 
-P12 Search for version metadata: `find / -maxdepth 6 \( -name ".vfs*" -o -name "*manifest*" -o -name "agent_files*" -o -name "*.revision" \) -print 2>/dev/null`.
+P12 搜索版本元数据：`find / -maxdepth 6 \( -name ".vfs*" -o -name "*manifest*" -o -name "agent_files*" -o -name "*.revision" \) -print 2>/dev/null`。
 
-### Raw results
+### 原始结果
 
 ```console
 // Forward collision — final state from three readers
@@ -314,34 +314,34 @@ $ find / -maxdepth 6 \( -name ".vfs*" -o -name "*manifest*" -o -name "agent_file
 (empty)
 ```
 
-### Analysis
+### 分析
 
-- Forward and reverse collisions both resolve to last-writer-wins across every reader. No reader reports a conflict, a version number, or an older revision.
-- Ten rapid `writeFileSync` calls to the same path never produce a partial or intermediate state on disk — the final read yields exactly the 10th payload. This is consistent with the `execute_js` contract "per-call atomic" (failed scripts discard writes) and single-writer serialization.
-- No `.vfs`, `.manifest`, `agent_files*`, or `.revision` files exist anywhere on the reachable filesystem. There is no revision tracker; the sandbox is a plain mounted subvolume.
+- 正向与反向冲突都以"最后写入者赢"结束，每个读取者都看到最新字节。没有任何读取者报告冲突、版本号或旧修订。
+- 连续 10 次 `writeFileSync` 向同一路径写入，最终磁盘从未落在中间态——最后一次读取精确得到第 10 次的 payload。这与 `execute_js` 的"每次调用原子化"契约（脚本抛异常即丢弃所有写入）以及单写入者串行化一致。
+- 可达文件系统的任何位置都没有 `.vfs`、`.manifest`、`agent_files*` 或 `.revision` 文件。不存在版本追踪器；沙箱就是一个普通挂载的子卷。
 
-### Result table
+### 结果汇总
 
-| Scenario | Winner | Evidence |
+| 场景 | 胜出者 | 证据 |
 |---|---|---|
-| ejs writes A, then file overwrites B | file (B wins) | P09: all readers see `"B\ndim3 file overwrite\n"` |
-| file writes X, then ejs overwrites Y | ejs (Y wins) | P10: all readers see `"Y\nejs overwrote\n"` |
-| 10× rapid ejs rewrites of same path | iter=9 | P11: final = `"iter=9 ts=1776697513776"` |
-| Hidden revision/manifest store? | none found | P12: `find` returns nothing relevant |
+| ejs 写 A，再由 file 覆盖为 B | file（B 胜出） | P09：所有读取者都看到 `"B\ndim3 file overwrite\n"` |
+| file 写 X，再由 ejs 覆盖为 Y | ejs（Y 胜出） | P10：所有读取者都看到 `"Y\nejs overwrote\n"` |
+| ejs 对同一路径 10× 连续重写 | iter=9 | P11：final = `"iter=9 ts=1776697513776"` |
+| 是否存在隐藏的 revision/manifest 存储？ | 未发现 | P12：`find` 未返回任何相关文件 |
 
-## Dimension 4 — Metadata preservation
+## 维度 4 — 元数据保留
 
-### Hypothesis
+### 假设
 
-Shell writes carry standard POSIX metadata (mode, mtime, owner, inode). execute_js `twin:fs` exposes a minimal `fs.Stats` subset. Cross-tool survival of non-regular-file artefacts (symlinks, hardlinks, executable bit) is uncertain.
+Shell 写入携带标准 POSIX 元数据（mode、mtime、owner、inode）。execute_js `twin:fs` 暴露一个最小化的 `fs.Stats` 子集。非普通文件工件（符号链接、硬链接、可执行位）的跨工具存活情况未知。
 
-### Procedure
+### 流程
 
-P13 From shell: `ln -sf` create symlink, `chmod +x` on a script, `ln` (hardlink) to `meta_*.txt`, `cp` a copy. All four siblings land in `/agent/generated`. P14 Inspect from **a fresh subsequent shell call** and from execute_js.
+P13 在 shell 里：`ln -sf` 创建符号链接、`chmod +x` 赋予脚本可执行位、`ln` 创建对 `meta_*.txt` 的硬链接、`cp` 做一次复制。四个兄弟产物都落在 `/agent/generated` 下。P14 从 **后续一次全新 shell 调用** 和 execute_js 分别检查。
 
-### Raw results
+### 原始结果
 
-**Shell initial state (same call that created them):**
+**Shell 创建时的初始状态（同一调用内）：**
 
 ```console
 $ ln -sf meta_P4M-mo7btrg0-667520774413868.txt /agent/generated/sym_P4ST-mo7btrg0-232913074808419.lnk
@@ -360,28 +360,28 @@ $ stat -c "orig_inode=%i hl_inode=%i links_orig=%h links_hl=%h" ...
 orig_inode=X hl_inode=X links_orig=2 links_hl=2
 ```
 
-**Fresh shell call (after VFS commit & remount):**
+**全新 shell 调用（VFS 提交 & 重挂载之后）：**
 
 ```console
 $ ls -la /agent/generated/sym_P4ST-mo7btrg0-232913074808419.lnk
-ls: cannot access: No such file or directory              # symlink LOST
+ls: cannot access: No such file or directory              # 符号链接丢失
 
 $ stat -c 'mode=%a' /agent/generated/chmod_P4M-mo7btrg0-667520774413868.sh
-mode=644                                                   # +x bit LOST
+mode=644                                                   # +x 位丢失
 
 $ stat -c 'path=%n ino=%i nlink=%h size=%s' meta_* hl_*
 path=/agent/generated/meta_...  ino=11594110 nlink=1 size=48
-path=/agent/generated/hl_...    ino=11594108 nlink=1 size=48   # hardlink DROPPED
-path=/agent/generated/cp_...    ino=11594099 nlink=1 size=48   # cp preserved
+path=/agent/generated/hl_...    ino=11594108 nlink=1 size=48   # 硬链接解除
+path=/agent/generated/cp_...    ino=11594099 nlink=1 size=48   # cp 保留
 
 $ stat -c 'atime=%x | mtime=%y | ctime=%z | birth=%w' meta_...
 atime=2026-04-20 15:11:49.661580592 +0000
 mtime=2026-04-20 15:11:49.661735736 +0000
 ctime=2026-04-20 15:11:49.661735736 +0000
-birth=2026-04-20 15:11:49.661580592 +0000    # ALL timestamps are the remount time
+birth=2026-04-20 15:11:49.661580592 +0000    # 所有时间戳都是重挂载时刻
 ```
 
-**execute_js metadata surface:**
+**execute_js 元数据表面：**
 
 ```console
 $ fs.statSync('/agent/current/generated/chmod_P4M-mo7btrg0-667520774413868.sh')
@@ -389,41 +389,41 @@ $ fs.statSync('/agent/current/generated/chmod_P4M-mo7btrg0-667520774413868.sh')
 // no mode, no mtime, no uid, no gid, no ino, no nlink
 ```
 
-### Analysis
+### 分析
 
-The shell sandbox is a **working copy** materialized anew on each invocation. The backing store preserves: path, byte content, and `644` mode. It loses: symlinks, executable bits, hardlink relationships (`nlink` count), original timestamps, and owner (because `/etc/passwd` is absent, `stat` prints `UNKNOWN`). `cp` produces a new inode on every shell call; this is uninteresting because every commit assigns fresh inodes regardless.
+Shell 沙箱是一个**工作副本**（working copy），每次调用重新物化。后端存储会保留：路径、字节内容、`644` 权限位。它会丢失：符号链接、可执行位、硬链接关系（`nlink` 计数）、原始时间戳、所有者（因 `/etc/passwd` 缺失，`stat` 显示 `UNKNOWN`）。`cp` 每次 shell 调用都会分到新 inode；这并不特殊，因为每次提交都会重分配 inode。
 
-execute_js's `twin:fs.Stats` is stripped down to `{size, isFile, isDirectory}` — there is literally no way to read mode, mtime, or uid from it. Use `shell` if you need POSIX metadata.
+execute_js 的 `twin:fs.Stats` 被精简为 `{size, isFile, isDirectory}`——根本没有 mode、mtime 或 uid 的读取通道。需要 POSIX 元数据时必须通过 `shell`。
 
-### Result table
+### 结果汇总
 
-| Metadata | Survives cross-call? | Cross-tool readable? |
+| 元数据 | 是否跨调用存活？ | 是否跨工具可读？ |
 |---|---|---|
-| Path | ✅ | ✅ |
-| Bytes | ✅ | ✅ |
-| Mode (`644`) | ✅ | shell only |
-| Executable bit (`+x`) | ❌ | shell sees 644 post-commit |
-| Symlink | ❌ | not observed on second call |
-| Hardlink (`nlink>1`) | ❌ | nlink=1 on both after remount |
-| mtime/atime/ctime | ❌ (all reset to commit time) | shell only |
-| Owner / group | named: ❌ (UNKNOWN), numeric 995/993 | shell only |
-| Inode number | ❌ (reassigned every call) | shell only |
+| 路径 | ✅ | ✅ |
+| 字节 | ✅ | ✅ |
+| 权限位（`644`） | ✅ | 仅 shell |
+| 可执行位（`+x`） | ❌ | shell 提交后看到的是 644 |
+| 符号链接 | ❌ | 第二次调用时已不可见 |
+| 硬链接（`nlink>1`） | ❌ | 重挂载后双方 nlink=1 |
+| mtime/atime/ctime | ❌（全部重置为提交时刻） | 仅 shell |
+| 所有者 / 组 | 具名形式：❌（UNKNOWN），数字形式 995/993 | 仅 shell |
+| Inode 编号 | ❌（每次调用重分配） | 仅 shell |
 
-## Dimension 5 — Size and count limits
+## 维度 5 — 大小与数量上限
 
-### Hypothesis
+### 假设
 
-- `execute_js` and `shell` can both write large files.
-- A ceiling exists somewhere — either per-file or per-commit.
-- 10 000 small files should be fine given 1.6 TB free.
+- `execute_js` 与 `shell` 都能写入大文件。
+- 某处存在上限——可能是单文件上限或单次提交总量上限。
+- 给定 1.6 TB 空闲，10 000 个小文件应当毫无压力。
 
-### Procedure
+### 流程
 
-P15 From execute_js, write 1 KB, 1 MB, 10 MB, 100 MB files; time each. P16 Count test: create 10, 100, 1 000, 10 000 tiny files each (then clean). P17 From shell, write 1 KB, 1 MB, 10 MB via `dd if=/dev/urandom`, and 100 MB. Observe which commit back.
+P15 从 execute_js 写 1 KB、1 MB、10 MB、100 MB 文件，逐个计时。P16 数量测试：分别创建 10、100、1 000、10 000 个小文件（随后清理）。P17 从 shell 通过 `dd if=/dev/urandom` 写 1 KB、1 MB、10 MB，再写 100 MB。观察哪些能回提成功。
 
-### Raw results
+### 原始结果
 
-**execute_js file-size latencies:**
+**execute_js 文件大小耗时：**
 
 ```console
 1 KB    : wrote=1024 bytes, ms=0
@@ -432,7 +432,7 @@ P15 From execute_js, write 1 KB, 1 MB, 10 MB, 100 MB files; time each. P16 Count
 100 MB  : wrote=104857600 bytes, ms=251     (ok=true)
 ```
 
-**execute_js count latencies:**
+**execute_js 数量耗时：**
 
 ```console
 10 files     : ms=0, perFile=0.000 ms
@@ -441,7 +441,7 @@ P15 From execute_js, write 1 KB, 1 MB, 10 MB, 100 MB files; time each. P16 Count
 10 000 files : ms=35, perFile=0.004 ms
 ```
 
-**shell output-commit cap — observed negative result:**
+**shell 输出提交上限——观察到的负面结果：**
 
 ```console
 // A shell call whose total produced files + stdout exceeded 100 MB returned:
@@ -451,7 +451,7 @@ stderr: "Command succeeded but output files could not be saved:
 // Shell-side /agent/generated writes from that call all discarded.
 ```
 
-**Shell size writes (after 100 MB file cleared, under cap):**
+**shell 大小写入（在 100 MB 文件清除、回到上限以下之后）：**
 
 ```console
 sh_1k   wanted=1024      got=1024      ms≈0
@@ -460,7 +460,7 @@ sh_10m  wanted=10485760  got=10485760  ms≈(a few seconds)
 sh_100m : 104857600 bytes via `dd bs=1M count=100`, removed before commit
 ```
 
-**Disk space before/after:**
+**前后磁盘空间：**
 
 ```console
 Filesystem      Size  Used Avail Use% Mounted on
@@ -468,52 +468,52 @@ Filesystem      Size  Used Avail Use% Mounted on
 tmpfs           567G     0  567G   0% /tmp
 ```
 
-### Analysis
+### 分析
 
-`execute_js` writes scale roughly linearly: ~2 ms/MB for sequential sync writes against the btrfs subvolume, 0.004 ms per small file with a warm cache. 100 MB succeeded cleanly; no truncation, no error.
+`execute_js` 的写入大致线性伸缩：对 btrfs 子卷的顺序同步写约 2 ms/MB，热缓存时每个小文件约 0.004 ms。100 MB 干净通过；无截断、无错误。
 
-**The real ceiling is the shell commit-back cap of exactly 104 857 600 bytes.** When crossed, the shell call returns exit_code=0 but a `stderr` banner announces the writes were discarded — this is a *silent-ish* failure in that the user-space script saw no error, only the VFS layer refused to publish the output. Crossing the cap also means the `files_written` array returned by the shell tool omits every file that was dropped, making it easy to miss.
+**真正的上限是 shell 回提上限 104 857 600 字节整**，不是单文件或单分区上限。越过时 shell 返回 exit_code=0，但 `stderr` 横幅告知写入被丢弃——这是一种**半静默**的失败：用户空间脚本看不到错误，只有 VFS 层拒绝发布输出。同时越上限还意味着 shell 工具返回的 `files_written` 数组会省略所有被丢弃的文件，很容易漏掉这种情况。
 
-execute_js has no observed ceiling at 100 MB or 10 000 files; we did not push further.
+execute_js 在 100 MB 或 10 000 文件的情况下未观察到上限；我们也没有继续向上压测。
 
-### Result table
+### 结果汇总
 
-| Test | Tool | Outcome | Error |
+| 测试 | 工具 | 结果 | 错误 |
 |---|---|---|---|
-| 1 KB | execute_js | OK (0 ms) | — |
-| 1 MB | execute_js | OK (2 ms) | — |
-| 10 MB | execute_js | OK (14 ms) | — |
-| 100 MB | execute_js | OK (251 ms) | — |
-| 10 000 files | execute_js | OK (35 ms total) | — |
-| Shell call whose output > 100 MB | shell | **silent drop** | "total output size exceeds limit (104857600 bytes)" |
-| 100 MB single file | shell (`dd`) | local write OK; commit requires total output < 100 MB | same cap |
+| 1 KB | execute_js | OK（0 ms） | — |
+| 1 MB | execute_js | OK（2 ms） | — |
+| 10 MB | execute_js | OK（14 ms） | — |
+| 100 MB | execute_js | OK（251 ms） | — |
+| 10 000 文件 | execute_js | OK（合计 35 ms） | — |
+| 单次 shell 调用输出 > 100 MB | shell | **静默丢弃** | "total output size exceeds limit (104857600 bytes)" |
+| 100 MB 单文件 | shell（`dd`） | 本地写 OK；提交要求整次调用输出 < 100 MB | 同一上限 |
 
-## Cross-cutting observations
+## 横切观察
 
-- **Subvolume singleton.** Every `/agent/*` btrfs mount plus `/workspace/chat` points to the same `subvolid=259, subvol=/tmp`. The per-mount ro/rw flag is the only policy, not physical separation.
-- **The shell sandbox is a working copy.** Fresh mtimes, fresh inodes, and dropped symlinks/hardlinks/executable bits on every invocation are all consistent with "dematerialize manifest on entry, rematerialize committed regular files on exit." This is not documented anywhere inside the sandbox.
-- **The `file` tool is namespace-blind.** It takes a `filename` parameter and can read/write regardless of whether the backing file sits under `downloads` or `generated`. This contradicts the preceding design-doc section that positioned it as a "downloads-only writer".
-- **execute_js cannot read POSIX metadata.** If your logic depends on mode/owner/mtime, you must shell out.
-- **The 100 MB shell commit cap is the single most dangerous quirk.** It makes large-output workflows silently lossy. Workaround: stream large results directly into the response (stdout) up to the 100 KB stdout cap, or prefer `execute_js` for any artefact >50 MB.
-- **`/tmp` is a shell-local scratchpad.** execute_js does not see it, and a new shell call wipes it. Do not depend on it for cross-call state.
-- **uid 995 / gid 993** show as "UNKNOWN" because `/etc/passwd` does not exist. Everything is still deterministic numerically.
+- **子卷单例。** 所有 `/agent/*` btrfs 挂载加 `/workspace/chat` 都指向同一个 `subvolid=259, subvol=/tmp`。各挂载点只有 ro/rw 标志的差别，不是物理隔离。
+- **shell 沙箱是一个工作副本。** 每次调用都出现"新鲜的 mtime、新鲜的 inode、丢失的符号链接/硬链接/可执行位"——与"进入时按 manifest 物化、退出时把已提交的普通文件回提"的模型完全吻合。这在沙箱内部没有任何文档说明。
+- **`file` 工具是命名空间无关的。** 它以 `filename` 为参数，可读可写——无论底层文件位于 `downloads` 还是 `generated`。这与先前设计文档里"只作为 downloads 写入者"的定位相矛盾。
+- **execute_js 读不到 POSIX 元数据。** 如果你的逻辑依赖 mode/owner/mtime，必须走 shell。
+- **100 MB shell 回提上限是最危险的怪点。** 它会让输出较大的工作流静默丢失。解决方案：把大结果直接流进 stdout（直到 100 KB 上限），或对任何 > 50 MB 的产物改用 `execute_js`。
+- **`/tmp` 是 shell 本地的草稿空间。** execute_js 看不到它，一次新的 shell 调用会清空它。不要指望它在跨调用之间保存任何状态。
+- **uid 995 / gid 993** 显示为 "UNKNOWN"，因为 `/etc/passwd` 不存在。只要用数字 id 一切都是确定的。
 
-## Headline findings
+## 头条发现
 
-1. **All six cross-tool visibility paths work** (P01–P06) with byte-identical content in both `downloads` and `generated` namespaces — one of eight pairings is impossible only because shell cannot write to the ro `/agent/downloads` mount (P07 EROFS trace).
-2. **The `file` tool reads from `generated` too, not only `downloads`** (P06) — this is a correction to the prior design doc.
-3. **Last-writer-wins with no metadata** — forward and reverse collisions both resolve to the latest bytes; 10× rapid rewrites leave only iter=9; no `.vfs`/`.manifest`/`.revision` files exist anywhere on the reachable filesystem (P09–P12).
-4. **Non-regular-file metadata is wiped on every shell commit** — symlinks vanish, `+x` bits revert to 644, hardlinks become independent files, all mtimes snap to the commit time (P13–P15).
-5. **execute_js `fs.Stats` is minimal** (`{size, isFile, isDirectory}`) — no mode, mtime, uid, or ino exposed.
-6. **The hard ceiling is a 104 857 600-byte shell output cap**, not a per-file or per-fs limit — a shell call whose committed output exceeds 100 MB **silently drops all writes** with only a `stderr` banner (P16 negative result).
-7. **execute_js handles at least 100 MB single files and 10 000 small files** with negligible latency (~2 ms/MB, ~0.004 ms/file).
-8. **All agent btrfs mounts share fsid `cfeb616c473e53b` and subvolid 259** — there is exactly one backing subvolume; the two tool namespaces (`/agent/downloads` vs `/agent/generated`) are sibling directories inside it, not mirror mounts (P08 mirror test).
-9. **`/tmp` is tmpfs and ephemeral per shell call**, invisible to execute_js; `/workspace/chat` and `/agent/context` are ro placeholders, empty in practice.
-10. **There is no persisted hostname, no `/etc/passwd`, and no `hostname` binary** — host identity is `cobb-prod` per `uname`, uid/gid are numeric 995/993, and stock `id` utilities print them unresolved.
+1. **六个跨工具可见性方向全部成立**（P01–P06），`downloads` 与 `generated` 命名空间的内容逐字节一致——八对写入/读取组合中只有一对不可行：shell 无法写入 ro 挂载的 `/agent/downloads`（P07 给出 EROFS 痕迹）。
+2. **`file` 工具也从 `generated` 读**，而不只是 `downloads`（P06）——这是对先前设计文档的修正。
+3. **最后写入者赢，零元数据**——正向、反向冲突最终都归于最新字节；10× 连续重写只保留 iter=9；可达文件系统的任何位置都找不到 `.vfs`/`.manifest`/`.revision` 文件（P09–P12）。
+4. **每次 shell 提交都会抹除非普通文件元数据**——符号链接消失、`+x` 位退回 644、硬链接变成独立文件、所有 mtime 都对齐到提交时刻（P13–P15）。
+5. **execute_js `fs.Stats` 极简**（`{size, isFile, isDirectory}`）——没有暴露 mode、mtime、uid 或 ino。
+6. **真正的上限是 104 857 600 字节 shell 输出封顶**，而非单文件或单文件系统上限——整次 shell 调用输出若越过 100 MB，所有写入会**静默丢弃**，只在 `stderr` 留下一行横幅（P16 负面结果）。
+7. **execute_js 能处理至少 100 MB 单文件与 10 000 个小文件**，延迟微乎其微（~2 ms/MB、~0.004 ms/文件）。
+8. **所有 agent btrfs 挂载共享 fsid `cfeb616c473e53b` 与 subvolid 259**——只有一份后端子卷；两个工具命名空间（`/agent/downloads` vs `/agent/generated`）是该子卷内的兄弟目录，不是互为镜像的挂载（P08 镜像测试）。
+9. **`/tmp` 是 tmpfs 且每次 shell 调用即逝**，execute_js 不可见；`/workspace/chat` 与 `/agent/context` 是 ro 占位符，实际运行时为空。
+10. **没有持久化的 hostname、没有 `/etc/passwd`、没有 `hostname` 二进制**——主机身份由 `uname` 给出 `cobb-prod`，uid/gid 以数字 995/993 出现，常见 `id` 工具打印它们时无法解析为名字。
 
-## Appendix — Raw probe transcripts
+## 附录 — 原始探针脚本记录
 
-### Transcript 1: Environment probe (shell)
+### Transcript 1：环境探针（shell）
 
 ```console
 ===ENV_BEGIN===
@@ -538,7 +538,7 @@ tmpfs / tmpfs rw,nosuid,nodev,relatime,uid=995,gid=993 0 0
 tmpfs /tmp tmpfs rw,nosuid,nodev,relatime,mode=755,uid=995,gid=993 0 0
 ```
 
-### Transcript 2: Dim 1 writer plants (execute_js)
+### Transcript 2：维度 1 写入植入（execute_js）
 
 ```console
 RUN_ID: Rmo7btrg0-126701172164598
@@ -556,7 +556,7 @@ dim5 counts: n10 OK, n100 OK, n1000 OK 3ms, n10000 OK 35ms
 dim5 100MB: wrote=104857600, ms=251, ok=true
 ```
 
-### Transcript 3: Dim 1 readers (shell)
+### Transcript 3：维度 1 读取（shell）
 
 ```console
 --- /agent/generated/probe_P1EG-mo7btrg0-917640988283214.txt ---
@@ -575,7 +575,7 @@ size=37 mtime=... mode=644
 dim1 writer=file namespace=downloads
 ```
 
-### Transcript 4: File-tool upload reads
+### Transcript 4：文件工具 upload 读取
 
 ```console
 // execute_js → file: upload proved read via downloads namespace
@@ -591,7 +591,7 @@ file.upload_via_curl(filename='collision_P3A-mo7btrg0-029649523288351.txt', url=
 => data="B\ndim3 file overwrite\n"   ← file(B) overwrote ejs(A)
 ```
 
-### Transcript 5: Persistence & /tmp lifecycle
+### Transcript 5：持久性与 /tmp 生命周期
 
 ```console
 // Shell call N — wrote /tmp/probe_tmp_shell_P2T-mo7btrg0-618965918717218.txt, visible
@@ -603,7 +603,7 @@ drwxr-xr-x 8 995 993 160 ... ..
 (probe file gone)
 ```
 
-### Transcript 6: Metadata erasure
+### Transcript 6：元数据抹除
 
 ```console
 // Same shell call as creation
@@ -626,7 +626,7 @@ ino=11594108 nlink=1
 (hardlink relationship gone; two separate inodes with same content)
 ```
 
-### Transcript 7: Size-cap negative result
+### Transcript 7：容量上限负面结果
 
 ```console
 (shell call with 100 MB ejs-side file still present plus all other outputs)
@@ -637,7 +637,7 @@ exit_code: 0
 files_written: [...pre-existing files only, no new ones from this call...]
 ```
 
-### Transcript 8: Final XOR-fold fingerprints (execute_js cross-check)
+### Transcript 8：最终 XOR 折叠指纹（execute_js 交叉验证）
 
 ```console
 /agent/current/generated/probe_P1EG-mo7btrg0-917640988283214.txt        size=97  xorfold=43cc10cf
@@ -650,8 +650,8 @@ files_written: [...pre-existing files only, no new ones from this call...]
 /agent/current/generated/rapid_P3R-mo7btrg0-906590488166303.txt          size=24  xorfold=adfd3bef  (iter=9)
 ```
 
-(The two ejs 97-byte probes share `xorfold=43cc10cf` because they have the same byte template and only the sub-label ("generated" vs "downloads") differs by content — but size matches and the XOR collision is expected for near-identical bytes. Byte-for-byte verification is done via `sha256sum` in shell transcripts above, which show different digests.)
+（两个 97 字节的 ejs 探针共享 `xorfold=43cc10cf`，因为它们模板相同、仅子标签（"generated" vs "downloads"）在内容层面有差别——但大小匹配，XOR 碰撞在如此相近的字节间是预期之中。字节级别的验证由 shell 原始记录中的 `sha256sum` 完成，其摘要不同。）
 
 ---
 
-_Report generated 2026-04-20T15:16:24.696Z · Agent run `build/Rmo7btrg0-126701172164598` · Total probes: 17 · This report is empirical. Any claim without a probe is a bug._
+_报告生成于 2026-04-20T15:15:xx.xxxZ · Agent run `build/Rmo7btrg0-126701172164598` · Total probes: 17 · 本报告为实测结果。任何没有探针支撑的断言都是 bug。_
