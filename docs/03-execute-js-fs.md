@@ -1,132 +1,61 @@
-# 03 — `execute_js` + fs 包
+# 03 — `execute_js` + `twin:fs`（实测）
 
-> JS 沙箱里的 `fs` 模块如何与 VFS 会话绑定,天然契合"短事务"提交模型。
+> 范围：`execute_js` 沙箱的文件系统视图与能力边界。
 
-| 状态 | 负责人 | 最后更新 |
-|---|---|---|
-| 初稿(对齐当前代码实现) | 周朗多 | 2026-04-20 |
+## 可见根
 
-## Scope
+`fs.readdirSync('/')` 返回：`['agent', 'workspace']`。
 
-`execute_js` 是 VFS 的**第一类短事务消费方**(第 9.1 节)。本文档说明:
+`fs.readdirSync('/agent')` 返回：`['current']` — **只有 `/agent/current`**；没有 `/agent/downloads`、`/agent/generated`、`/agent/context`。
 
-- 一次 `execute_js` 调用怎么映射到一次 VFS 会话
-- JS 代码看到的 `fs` API
-- 成功 → 提交、失败 → 丢弃的原子语义
-- JS 代码**不能**做什么
+`fs.readdirSync('/agent/current')` 返回：`['downloads', 'generated']`。
 
-## 映射关系
+`fs.readdirSync('/workspace')` 在 `execute_js` 里不可读取（未探测到内容）。
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant H as execute_js host
-    participant V as vfs.Manager
-    participant S as vfs.Session
-    participant J as JS 沙箱(fs API)
+**`/tmp` 和 `/` 的其他路径都不存在于 `execute_js` 的视图里。**
 
-    H->>V: Start(namespace)
-    V-->>H: Session(rev=N)
-    H->>J: expose fs API bound to Session
-    J->>S: readFile / writeFile / deleteFile
-    Note right of S: 所有修改只在<br/>会话临时区
-    alt JS 脚本成功返回
-        H->>S: Commit()
-        S-->>H: rev=N+1
-    else JS 脚本抛异常
-        H->>S: Discard()
-        S-->>H: rev 保持 N
-    end
-```
+## 可写路径
 
-**一次 `execute_js` 调用 = 一次 Session = 一次潜在 commit。** 没有跨调用的状态。
+`twin:fs` 允许 `writeFileSync` 的路径只有：
+- `/agent/current/downloads/*`
+- `/agent/current/generated/*`
 
-## JS 侧 API
+其它任何路径都会 `EACCES: path is read-only`，实测包括：
+- `/agent/downloads/...` — 不存在
+- `/agent/generated/...` — 不存在
+- `/tmp/...` — 不存在
+- `/workspace/...` — read-only
 
-JS 代码看到的 `fs` 是"绑定到本次 session 的文件句柄",不是 Node 原生 fs。API 形状示意(**不是**最终签名,细节以代码为准):
+## 持久性
 
-```js
-const fs = require('twin:fs');
+实测多次 `writeFileSync → storeVar → ` 再下一次 `execute_js` readFileSync`` 链路，全部成功。`execute_js` 的写对后端是**立即提交**的，没有观察到丢失现象。
 
-// 读
-const buf  = fs.readFile('/agent/downloads/input.csv');        // Buffer
-const text = fs.readFile('/agent/downloads/notes.md', 'utf8'); // string
+## 跨工具可见性（实测）
 
-// 写(目标必须在可写区)
-fs.writeFile('/agent/generated/out.json', JSON.stringify(result));
-
-// 列
-const entries = fs.listFiles('/agent/downloads');  // [{path, size, ...}]
-
-// 删
-fs.deleteFile('/agent/generated/tmp.bin');
-```
-
-所有调用都走 session,内容级修改只在会话内可见,直到 host 在脚本成功返回后调用 `Commit` 才真正落盘。
-
-## 为什么 execute_js 天然契合
-
-| 短事务需求 | execute_js 已有特性 |
+| 场景 | 结果 |
 |---|---|
-| 一次会话、一次提交 | 一次工具调用就结束 |
-| 脚本失败应丢弃所有改动 | 异常即异常,host 只需 `Discard` |
-| 不需要跨调用保留状态 | 每次沙箱都是新的 |
-| 操作必须经过统一路径 | JS 拿不到原生 fs,只能走暴露的 API |
+| `execute_js` 写 `/agent/current/generated/foo.txt` → 下一次 `shell` 读 `/agent/generated/foo.txt` | ✅ 可见，内容一致 |
+| `execute_js` 写 `/agent/current/downloads/foo.txt` → 下一次 `shell` 读 `/agent/downloads/foo.txt` | ✅ 可见 |
+| `shell` 写 `/agent/generated/foo.txt` → 下一次 `execute_js` 读 `/agent/current/generated/foo.txt` | ✅ 可见（多数情况下；见 04/05 对 shell 罕见丢失的说明） |
+| `file` 下载 `foo.txt` → `execute_js` 读 `/agent/current/downloads/foo.txt` | ✅ 可见 |
 
-一句话:执行模型和 VFS 的"先运行,后提交"模型**天然对齐**。
+## API 表面
 
-## 成功 → 提交,失败 → 丢弃
-
-```go
-// execute_js 宿主侧伪代码
-session, _ := mgr.Start(ctx, namespace)
-defer session.Close()
-
-host.ExposeFSToSandbox(session)
-result, jsErr := host.RunScript(userCode)
-
-if jsErr != nil {
-    session.Discard()       // 放弃所有写入
-    return jsErr
-}
-return session.Commit(ctx)  // 冲突检测在这里
+`require('twin:fs')` 提供同步 Node.js 风格 API：
+```js
+fs.readFileSync(path, encoding?)
+fs.writeFileSync(path, data, encoding?)
+fs.readdirSync(path, options?)
+fs.statSync(path)
+fs.existsSync(path)
+fs.mkdirSync(path, options?)
+fs.unlinkSync(path) / fs.rmSync(path)
+fs.renameSync(oldPath, newPath)
+fs.copyFileSync(src, dest)
 ```
 
-如果 `Commit` 返回冲突,执行结果在 JS 侧**已经产出**,只是没落到 VFS。调用方需要决定是重试整个 `execute_js`,还是把冲突上抛。
+**不可用**：`crypto` 模块（实测抛 `Cannot find module 'crypto'`），`Buffer.isBuffer` 的行为与标准 Node 不完全一致。如需哈希，把数据落到 `shell` 再用 `sha256sum`。
 
-> **Note**
-> "JS 脚本成功 + commit 冲突"并不会静默吃掉——host 必须把冲突错误传回给调用者(见 [docs/05](./05-conflicts-and-revisions.md))。
+## 原子性
 
-## JS 代码不能做什么
-
-```mermaid
-flowchart LR
-    JS[JS 脚本] -->|允许| API[fs via session]
-    JS -.->|禁止| DB[(agent_files 直连)]
-    JS -.->|禁止| S3[(S3 key 拼接)]
-    JS -.->|禁止| OSFS[/host 原生 fs/]
-    JS -.->|禁止| OUT[逃出布局根的路径]
-
-    style DB stroke-dasharray: 4 4
-    style S3 stroke-dasharray: 4 4
-    style OSFS stroke-dasharray: 4 4
-    style OUT stroke-dasharray: 4 4
-```
-
-| 动作 | 允许? | 原因 |
-|---|---|---|
-| 通过暴露的 `fs` 读写 | ✅ | — |
-| 直接访问 `agent_files` | ❌ | 绕过 manifest 层,破坏第 9.3 节公共约定 |
-| 自己拼 `vfs/blobs/sha256/<hash>` | ❌ | 同上 |
-| 访问宿主原生 fs、process、子进程 | ❌ | 沙箱边界 |
-| 写到 `/agent/downloads` 或 `/agent/context` | ❌ | 只读区(第 5 节) |
-| 用 `../` 跨出布局根 | ❌ | 非法路径 |
-
-> **Warning**
-> 哪怕 JS 侧"写成功"但目标是只读区,`Commit` 也会失败,整次调用的其他合法写入也会一起丢。这是"先运行,后提交"的代价——以原子性换事务性。
-
-## 相关
-
-- 同样"短事务"但从工具层看 → [docs/02 — file tool](./02-file-tool.md)
-- 为什么 shell 不能直接套这个模型 → [docs/04 — shell tool](./04-shell-tool.md)
-- commit 时 revision 如何校验 → [docs/05 — conflicts & revisions](./05-conflicts-and-revisions.md)
+来自工具描述：**单次 `execute_js` 调用内的所有写操作是原子的**——脚本抛异常时所有写入都被丢弃。实测未做针对性验证，按官方声明执行。
