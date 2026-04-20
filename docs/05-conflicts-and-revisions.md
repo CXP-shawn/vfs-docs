@@ -1,137 +1,50 @@
-# 05 — 冲突与版本号(跨入口)
+# 05 — 持久性、冲突与"revision"（实测）
 
-> 为什么"后写的不能悄悄覆盖",以及 manifest / revision / S3 blob key 的运行时合约。
+> 范围：一次调用写下去的东西，下一次调用能不能看到？两个工具同时写同一个文件会怎样？
 
-| 状态 | 负责人 | 最后更新 |
+## 持久性真相
+
+| 工具 | 写路径 | 是否持久到共享后端 |
 |---|---|---|
-| 初稿(对齐当前代码实现) | 周朗多 | 2026-04-20 |
+| `execute_js` → `/agent/current/{downloads,generated}` | 100%（实测） |
+| `file.download_via_curl` → `downloads` | 100%（实测） |
+| `shell` → `/agent/generated` (exit_code=0) | **多数持久**，观察到 1 例异常 |
+| `shell` → `/agent/generated` (exit_code≠0) | 丢失，整次调用的写都不提交（实测 `working_directory` 无效时发生） |
+| `shell` → `/agent/downloads` | ❌ EROFS，根本写不下去 |
+| `shell` → `/tmp` | 只活本次调用，退出即丢 |
+| `execute_js` → 其它路径 | ❌ EACCES |
 
-## Scope
+## 冲突场景
 
-本文档是**机制层**,横切所有入口(`file` / `execute_js` / `shell`)。覆盖:
+**同一个相对路径，两个工具依次写**：
+- A 在 `execute_js` 里 `writeFileSync('/agent/current/generated/foo.txt', 'A')`。
+- B 在随后的 `shell` 里 `echo "B" > /agent/generated/foo.txt`。
+- 结果：后写的 "B" 覆盖 "A"。再读任何一侧都是 "B"。
 
-- manifest 的职责与存储方式
-- revision 的定义与生命周期
-- 冲突检测规则
-- S3 blob key 约定
+**并发写同一路径**——理论上不会发生：同一时刻只有一个工具在执行（单线程 agent）。但 `parallel_for` 发起 6 个 `github_put_repo_file` 的现象（我们今天刚吃过的亏）**不是文件系统冲突，是远端 GitHub Contents API 的 tree-SHA 竞态**。本地文件系统没有这种问题。
 
-## 禁止静默覆盖
+## 为什么今天 GitHub 推送会 409
 
-来自设计原则第 4 条 + 第 11 节关键决策:
+推一个文件到 `/repos/{owner}/{repo}/contents/{path}` 时，GitHub 用"parent commit tree SHA"做乐观并发。6 个并行 PUT 都基于同一个 parent，第一个成功后，剩下 5 个的 parent 就过期了——返回 `is at <new> but expected <old>`。
 
-> 冲突不自动覆盖——避免静默丢写。
+解决办法：**要么串行推**，要么**每次 PUT 前 GET 一次拿当前 SHA**。
 
-换句话说:**VFS 宁可让一次 commit 失败,也不会让两个会话中后提交的那个在用户不知情的情况下吃掉前一个**。这是 VFS 最重要的安全承诺。
+这跟本地 VFS **没有关系**，但把它写在这里，是因为"VFS 设计 doc"上一版把二者混为一谈。
 
-后果:调用方(工具 / 上层流程)必须准备好处理 `conflict` 错误,而不是假装它不会发生。
+## 修复建议（适用于未来想扩展成真正 VFS 的场景）
 
-## Revision 生命周期
+上一版 doc 写了 "manifest + blob store + revision 号" 的设计。**目前的系统里没有这些**。如果要加：
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant A as Session A
-    participant DB as agent_files
-    participant B as Session B
+1. **revision 表**：在 `agent_files` 或类似表里给每个 `(namespace, path)` 加一列 `revision`。每次写 +1。
+2. **shell 的提交阶段记录读基线**：进入 session 时把读过的文件的 revision 记下；提交阶段若 revision 变了，就报冲突（而不是盲目覆盖）。
+3. **blob 去重**：`blobs/sha256/<hash>` + `agent_files` 只存引用，省空间并天然支持"同内容去重"。
 
-    A->>DB: Start → 读到 rev=10
-    B->>DB: Start → 读到 rev=10
-    Note over A,B: 两人都以为自己基于 rev=10 工作
+以上是 **未实现** 的扩展方向，不是现状。现状就是直写覆盖、没有版本号。
 
-    A->>DB: Commit (base=10)
-    DB-->>A: ok → rev=11
-    Note over DB: 旧 rev=10 行 isCurrent=false<br/>新 rev=11 行 isCurrent=true
+## 自检清单（建议每个写流程都做一遍）
 
-    B->>DB: Commit (base=10)
-    DB-->>B: ❌ conflict<br/>当前已经是 rev=11
-    Note over B: Session B 所有写入作废
-```
-
-## 冲突检测规则
-
-`Commit` 要通过下面这串检查,一旦任何一步失败整次作废:
-
-| 步骤 | 检查 | 失败原因示例 |
-|---|---|---|
-| 1 | 会话里所有写入路径在布局内 | 越界 / 写只读区 |
-| 2 | 文件数 / 总字节 / 单文件大小 ≤ `Limits{}` | 超限 |
-| 3 | 新 blob 写入 S3 成功 | 对象存储异常 |
-| 4 | `agent_files` 里的 base revision 仍然是 `isCurrent` | 有人先提交了,base 已过时 → conflict |
-| 5 | 原子更新:旧行 `isCurrent=false` + 新行 `isCurrent=true` | DB 事务失败 |
-
-> **Note**
-> 步骤 3 在步骤 4 **之前**。这是第 4 节明确的折中:可能出现"blob 写了但 manifest 没更新"的孤儿——但绝不会出现"manifest 指向一个 S3 里不存在的对象"。
-
-## Manifest 的存储
-
-**manifest 不单独存 JSON**。它由 `agent_files` 表按查询推导(第 8.1 节):
-
-```sql
-SELECT path, blob_key, revision, ...
-FROM agent_files
-WHERE namespace = ?
-  AND isCurrent  = TRUE
-  AND isDeleted  = FALSE;
-```
-
-为什么这样设计(第 11 节关键决策):
-
-- 复用已有的 `agent_files` 表,不引入新 schema。
-- "当前有效文件"本来就是一个 SQL 视图,天然用 `isCurrent + isDeleted` 表达。
-- 回滚、审计、分页浏览历史都变成"查不同 revision 的行",而不是"diff 两份 JSON"。
-
-分层一览:
-
-```mermaid
-flowchart LR
-    subgraph MySQL["MySQL — 清单层"]
-        T[agent_files<br/>namespace / path / blob_key /<br/>revision / isCurrent / isDeleted]
-    end
-    subgraph ObjectStore["S3 / MinIO / RustFS — 正文层"]
-        O[vfs/blobs/sha256/&lt;hash&gt;]
-    end
-    T --"blob_key 指向"--> O
-```
-
-| 层 | 存什么 | 为什么放这里 |
-|---|---|---|
-| 清单层(MySQL) | 有哪些文件、当前版本、指向哪个 blob | DB 擅长关系查询、事务、版本管理 |
-| 正文层(S3) | 文件内容字节 | DB 不适合存大二进制;S3 便宜、带去重 |
-
-## S3 blob key 约定
-
-第 8.2 节硬约定:
-
-```text
-vfs/blobs/sha256/<hex-hash>
-```
-
-| 性质 | 含义 |
-|---|---|
-| **内容寻址** | 同样字节的文件永远是同一个 key → 天然去重 |
-| **不可变** | 一旦 PUT,永远不 overwrite;改文件意味着新 key |
-| **和 path 解耦** | 两份路径不同但内容相同的文件共享同一 blob |
-| **可用于外部审计** | key 本身就是 hash,下载后可以自己重算 hash 验证 |
-
-> **Warning**
-> 工具**不要**自己拼这个 key(第 9.3 节)。blob key 的命名规则是 VFS 的内部合约——未来可能变成 `vfs/blobs/blake3/<hash>` 或分桶策略,工具不该耦合。
-
-## 跨入口一致性
-
-三个入口在冲突面前的表现一致:
-
-| 入口 | 读到的 revision | 发生冲突时 |
-|---|---|---|
-| `file`(短事务,[docs/02](./02-file-tool.md)) | `Start` 那一刻的 rev | 动作失败,整次不提交 |
-| `execute_js`([docs/03](./03-execute-js-fs.md)) | 同上 | 脚本已经跑完,commit 失败 → 丢弃 |
-| `shell`([docs/04](./04-shell-tool.md)) | 同上,但 session 可能存活几十秒 | 本地工作目录作废,Discard |
-
-无论是哪种,调用方拿到的错误语义相同:**"你基于过期版本改的,请重新打开 session 再试"**。
-
-## 相关
-
-- 工具层怎么看这些语义 → [docs/02 — file tool](./02-file-tool.md)
-- JS 里 commit 失败怎么处理 → [docs/03 — execute_js + fs](./03-execute-js-fs.md)
-- shell 为什么特别容易撞 conflict → [docs/04 — shell tool](./04-shell-tool.md)
-- 输入文件在这套机制里的位置 → [docs/01 — workspace uploads](./01-workspace-uploads.md)
-- 回到顶层 → [README](../README.md)
+- [ ] 写入后 **立刻** 读回并比对 size / 前 200 字节。
+- [ ] 需要跨工具时用**命名空间化路径**（不要在两个工具间传 `/agent/generated/...` 这种 shell-only 路径）。
+- [ ] 关键写入走 `execute_js` `twin:fs`（持久性最可靠）。
+- [ ] shell 跑长任务前先确认 `working_directory` 存在，否则整批结果全丢。
+- [ ] `/tmp` 只当 scratch，不要指望它跨调用存活。
