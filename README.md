@@ -92,6 +92,18 @@ tmpfs      /                 tmpfs rw,...
 - [04 - shell 工具](./docs/04-shell-tool.md)
 - [05 - 持久性与跨工具一致性](./docs/05-conflicts-and-revisions.md)
 
+### 修订版 (docs_v2)
+
+> docs_v2 为依据 AUDIT.md 与事实来源重写的修订版，已合并自 PR #1（commit 60bb801）。原 docs/ 保持不变以便对照。
+
+- [01 — 用户上传与工作区（修订版）](./docs_v2/01-workspace-uploads.md)
+- [02 — `file` 工具（修订版）](./docs_v2/02-file-tool.md)
+- [03 — `execute_js` + `twin:fs`（修订版）](./docs_v2/03-execute-js-fs.md)
+- [04 — `shell` 工具（修订版）](./docs_v2/04-shell-tool.md)
+- [05 — 持久性、冲突与 "revision"（修订版）](./docs_v2/05-conflicts-and-revisions.md)
+- [修订日志 (CHANGELOG)](./docs_v2/CHANGELOG.md)
+- [事实审计报告 (AUDIT)](./docs_v2/AUDIT.md)
+
 ---
 
 _本版本基于 2026-04-20 在生产沙箱内运行的探测结果编写。所有"实测"断言均由 `shell` / `execute_js` / `file` 的真实调用支持；下游所有结论都可据此复现。_
